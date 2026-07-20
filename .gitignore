@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+work/
+outputs/
+node_modules/
+evaluation_deepseek.json
+evaluation_recheck.json
