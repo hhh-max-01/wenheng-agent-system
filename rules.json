@@ -1,0 +1,17 @@
+[
+  {"rule_id":"R-C01","name":"模板残留检查","description":"不得保留填写说明、待补充、占位符或删除提示；单独的签字日期空白不属于本规则","dataset_types":["通用"],"severity":"blocking"},
+  {"rule_id":"R-C02","name":"关键字段完整性","description":"项目名称、单位、负责人、期限、研究内容等关键字段必须在全文中完整，内容位于其他表格或章节不算缺失","dataset_types":["通用"],"severity":"blocking"},
+  {"rule_id":"R-C03","name":"跨章节信息一致性","description":"名称、编号、单位、负责人、年龄、职称、时间等重复字段应一致","dataset_types":["通用"],"severity":"blocking"},
+  {"rule_id":"R-C04","name":"考核指标可验收性","description":"指标应完整、量化、口径一致，并有合理考核方式","dataset_types":["计划任务书"],"severity":"blocking"},
+  {"rule_id":"R-C05","name":"进度计划完整性","description":"阶段安排应覆盖整个执行期，顺序正确并包含验收活动","dataset_types":["计划任务书"],"severity":"blocking"},
+  {"rule_id":"R-C06","name":"预算闭合与合理性","description":"相同统计口径下的总额、分类金额、年度金额和明细应一致；禁止将费用性明细与包含资本性的总经费直接比较","dataset_types":["通用"],"severity":"blocking"},
+  {"rule_id":"R-C07","name":"团队与分工合规性","description":"序号、人员信息、所在单位和任务分工应有效、一致、可解释","dataset_types":["通用"],"severity":"blocking"},
+  {"rule_id":"R-C08","name":"成果状态可交付性","description":"成果名称、数量、状态和评测方式应满足最终验收要求","dataset_types":["计划任务书"],"severity":"blocking"},
+  {"rule_id":"R-C09","name":"审批意见有效性","description":"审批意见应完整、明确且不存在否决或退回信息","dataset_types":["立项申请书"],"severity":"blocking"},
+  {"rule_id":"R-A01","name":"申报内容完整性","description":"研究内容、预期成果、应用前景、技术原理和创新点应齐全","dataset_types":["立项申请书"],"severity":"blocking"},
+  {"rule_id":"R-A02","name":"问题与方案匹配","description":"方案应针对明确业务痛点，技术原理能支撑预期效果","dataset_types":["立项申请书"],"severity":"major"},
+  {"rule_id":"R-A03","name":"创新实质性","description":"创新点应具体、可区分且不是简单设备拼装或概念堆砌","dataset_types":["立项申请书"],"severity":"major"},
+  {"rule_id":"R-A04","name":"应用价值与推广性","description":"预期价值、适用场景和推广路径应与方案相符","dataset_types":["立项申请书"],"severity":"major"},
+  {"rule_id":"R-G01","name":"Intent语义匹配","description":"仅使用与用户当前判断目标有关的规则作出裁决","dataset_types":["通用"],"severity":"major"},
+  {"rule_id":"R-G02","name":"证据可追溯性","description":"每个命中规则必须有文档原文或明确缺失事实支撑","dataset_types":["通用"],"severity":"blocking"}
+]
