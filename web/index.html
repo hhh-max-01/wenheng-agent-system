@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="面向计划任务书与立项申请书的可解释智能审核系统">
+  <title>文衡 · 智能业务文档审核</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="文衡首页">
+      <span class="brand-mark">文</span>
+      <span><strong>文衡</strong><small>智能业务文档审核</small></span>
+    </a>
+    <span id="modeBadge" class="mode-badge">正在检查系统状态</span>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="eyebrow">DOCUMENT DECISION AGENT</div>
+      <h1>让每一次业务判断<br><span>都有规则，也有证据。</span></h1>
+      <p>上传计划任务书或立项申请书，输入审核目标。系统将拆解意图、提取事实、匹配规则，并返回可追溯的判断结果。</p>
+      <div class="workflow" aria-label="审核流程">
+        <span>01 意图解析</span><i></i><span>02 事实提取</span><i></i><span>03 规则匹配</span><i></i><span>04 综合裁决</span>
+      </div>
+    </section>
+
+    <section class="workspace" aria-label="审核工作台">
+      <div class="panel input-panel">
+        <div class="panel-heading">
+          <div><span class="step">01</span><h2>设置审核任务</h2></div>
+          <p>支持多文件或包含多条记录的 JSON / CSV</p>
+        </div>
+
+        <form id="judgeForm">
+          <fieldset>
+            <legend>数据集类型</legend>
+            <div class="type-switch">
+              <label><input type="radio" name="datasetType" value="计划任务书" checked><span><b>计划任务书</b><small>指标、进度、预算与成果验收</small></span></label>
+              <label><input type="radio" name="datasetType" value="立项申请书"><span><b>立项申请书</b><small>问题、方案、创新与审批合规</small></span></label>
+            </div>
+          </fieldset>
+
+          <label class="field-label" for="intent">判断 Intent</label>
+          <div class="intent-wrap">
+            <textarea id="intent" rows="3" required>判断该项目是否可以通过立项申请</textarea>
+            <span id="intentCount">17 / 200</span>
+          </div>
+          <div class="quick-intents" aria-label="常用判断目标">
+            <button type="button" data-intent="判断该项目是否可以通过立项申请">是否通过立项</button>
+            <button type="button" data-intent="判断项目材料是否完整、一致且具备可验收性">材料合规性</button>
+            <button type="button" data-intent="判断项目创新程度是否足够">创新程度</button>
+          </div>
+
+          <label class="upload" id="dropzone" for="files">
+            <input id="files" type="file" multiple accept=".docx,.pdf,.json,.csv,.txt,.md">
+            <span class="upload-icon">↑</span>
+            <strong>拖放文件到这里，或点击选择</strong>
+            <small>DOCX、PDF、JSON、CSV、TXT、MD · 单次总量不超过 18MB</small>
+          </label>
+          <ul id="fileList" class="file-list" aria-live="polite"></ul>
+
+          <button class="run-button" id="runButton" type="submit">
+            <span>开始智能审核</span><b>→</b>
+          </button>
+          <p class="privacy">文件仅用于当前判断流程。正式部署时，模型密钥由服务端环境变量保管。</p>
+        </form>
+      </div>
+
+      <div class="panel result-panel">
+        <div class="panel-heading">
+          <div><span class="step">02</span><h2>判断结果</h2></div>
+          <button id="copyButton" class="copy-button" type="button" hidden>复制 JSON</button>
+        </div>
+        <div id="emptyState" class="empty-state">
+          <div class="radar"><span></span><span></span><span></span><b>✓</b></div>
+          <h3>等待审核任务</h3>
+          <p>完成左侧设置后，结果将在这里按数据逐条展示。</p>
+          <div class="output-schema"><code>label</code><code>matched_rules</code><code>evidence</code><code>reason</code></div>
+        </div>
+        <div id="loadingState" class="loading-state" hidden>
+          <div class="loader"></div><h3>正在理解文档并匹配规则</h3><p>批量文件可能需要一些时间，请保持页面打开。</p>
+        </div>
+        <div id="errorState" class="error-state" hidden></div>
+        <div id="resultSummary" class="result-summary" hidden></div>
+        <div id="results" class="results"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer><span>文衡智能审核系统</span><span>规则可解释 · 证据可追溯 · 结果可复现</span></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>
