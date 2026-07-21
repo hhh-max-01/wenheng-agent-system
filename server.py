@@ -53,8 +53,10 @@ def load_local_env() -> None:
 
 load_local_env()
 RULES = json.loads((ROOT / "rules.json").read_text(encoding="utf-8"))
+REVIEW_MEMORY = json.loads((ROOT / "review_memory.json").read_text(encoding="utf-8"))
 MAX_REQUEST_BYTES = 25 * 1024 * 1024
-MAX_TEXT_CHARS = 60_000
+MAX_TEXT_CHARS = 120_000
+MAX_COMPACT_CHARS = 24_000
 
 
 @dataclass
@@ -70,6 +72,38 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()[:MAX_TEXT_CHARS]
+
+
+def compact_document(text: str, dataset_type: str, max_chars: int = MAX_COMPACT_CHARS) -> str:
+    """Keep audit-heavy sections and both ends of long documents within the model budget."""
+    if len(text) <= max_chars:
+        return text
+    keywords = {
+        "项目", "负责人", "年龄", "职称", "单位", "人员", "团队", "分工",
+        "期限", "日期", "时间", "阶段", "进度", "验收", "考核", "指标",
+        "预算", "经费", "材料费", "加工费", "测试费", "合计", "总额",
+        "成果", "专利", "报告", "研究内容", "技术", "创新", "问题", "方案",
+    }
+    if dataset_type == "立项申请书":
+        keywords.update({"审批", "意见", "同意", "不同意", "应用前景"})
+    lines = text.splitlines()
+    selected = set(range(min(45, len(lines))))
+    selected.update(range(max(0, len(lines) - 30), len(lines)))
+    for index, line in enumerate(lines):
+        if "|" in line or any(keyword in line for keyword in keywords):
+            selected.update(range(max(0, index - 2), min(len(lines), index + 3)))
+    compacted = "\n".join(lines[index] for index in sorted(selected))
+    if len(compacted) > max_chars:
+        half = (max_chars - 80) // 2
+        compacted = f"{compacted[:half]}\n……[中间低相关内容已压缩]……\n{compacted[-half:]}"
+    return compacted
+
+
+def relevant_memory(dataset_type: str) -> list[dict[str, Any]]:
+    return [
+        item for item in REVIEW_MEMORY
+        if dataset_type in item.get("dataset_types", []) or "通用" in item.get("dataset_types", [])
+    ]
 
 
 def _read_zip_member_without_crc(data: bytes, info: zipfile.ZipInfo) -> bytes:
@@ -490,57 +524,12 @@ def parse_json_response(content: str) -> dict[str, Any]:
     return json.loads(content[start:end + 1])
 
 
-def call_llm(
-    record: Record,
-    dataset_type: str,
-    intent: str,
-    checks: list[dict[str, str]],
-    review_note: str | None = None,
-) -> dict[str, Any]:
+def request_llm_json(system: str, prompt: dict[str, Any], max_tokens: int = 1400) -> dict[str, Any]:
     api_key = os.getenv("LLM_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("LLM_API_KEY 未配置")
     base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
     model = os.getenv("LLM_MODEL", "deepseek-chat")
-    candidate_rules = select_rules(dataset_type, intent)
-    system = """你是业务文档合规判断智能体。必须先分析intent，再提取事实，分别寻找否决证据和通过条件，匹配规则，最后输出硬标签。不能根据项目题目热门程度猜测。evidence必须是文档中的短原文或明确的缺失事实，不得编造。仅输出一个JSON对象，不输出Markdown。"""
-    prompt = {
-        "task": "根据intent审核文档并返回固定结构结果",
-        "dataset_type": dataset_type,
-        "intent": intent,
-        "record_id": record.id,
-        "candidate_rules": candidate_rules,
-        "deterministic_checks": checks,
-        "decision_policy": [
-            "按顺序完成：提取关键事实、检查硬性缺陷、评估问题方案匹配、评估创新实质、核对一致性，最后裁决",
-            "先检查blocking规则；命中且证据充分通常判不通过",
-            "未发现否决证据不等于自动通过；通过必须有充分正面证据",
-            "信息缺失影响核心判断时判不通过，不要猜测",
-            "matched_rules只放真正用于裁决且有证据的规则",
-        ],
-        "calibration_guardrails": [
-            "签字、公章或日期空白不能单独否决；但审批意见栏只有公章或日期占位，没有同意、不同意、退回、建议等意见内容时，属于审批意见本身空白；立项申请书两级意见均空白应按R-C09审查",
-            "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
-            "同一人员在负责人信息、人员简历和团队表中的年龄、职称、单位必须逐项比对；字段都已填写但取值不一致仍应按R-C03否决",
-            "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
-            "同一笔材料、加工或测试费用若同时计入不同预算科目或在科目与明细中重复列支，应按R-C06审查",
-            "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
-            "非关键格式瑕疵不能替代与当前intent有关的实质否决证据",
-        ],
-        "few_shot_principles": [
-            "若材料只有现成部件组合、通用功能罗列和泛化效益，没有可区分的关键机制或验证指标，应按创新实质不足审查R-A03",
-            "若方案给出明确业务痛点、可区分技术机制、可验证指标且跨章节一致，不能仅因题目普通或签章日期空白否决",
-        ],
-        "required_output": {
-            "label": "通过 或 不通过",
-            "matched_rules": [{"rule_id": "规则编号", "rule_name": "规则名", "evidence": "文档原文证据"}],
-            "reason": "不超过120字",
-            "confidence": "0到1之间的小数",
-        },
-        "document": record.text,
-    }
-    if review_note:
-        prompt["independent_review"] = review_note
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
@@ -552,7 +541,7 @@ def call_llm(
         body = json.dumps({
             "model": model,
             "temperature": 0,
-            "max_tokens": 1400,
+            "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
             "messages": messages,
         }, ensure_ascii=False).encode("utf-8")
@@ -580,6 +569,103 @@ def call_llm(
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             last_error = exc
     raise RuntimeError(f"模型连续两次未返回有效JSON：{last_error}")
+
+
+def extract_review_spec(
+    record: Record,
+    dataset_type: str,
+    intent: str,
+    checks: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Stage 1: extract a compact, evidence-bearing handoff before any label decision."""
+    system = (
+        "你是业务文档事实提取智能体，不做最终通过/不通过判断。"
+        "先按字段提取事实，再交叉比对重复信息，单独列出可能的否决证据。"
+        "所有冲突必须引用可核对的短原文，不得根据文件名或已知标签猜测。仅输出JSON对象。"
+    )
+    prompt = {
+        "task": "生成供下游裁决智能体使用的Spec交接单",
+        "dataset_type": dataset_type,
+        "intent": intent,
+        "deterministic_checks": checks,
+        "review_memory": relevant_memory(dataset_type),
+        "extraction_order": [
+            "提取项目基本信息",
+            "提取每一处人员姓名、年龄、职称、单位和分工",
+            "提取项目期限及所有阶段日期",
+            "提取预算总额、科目、金额及明细",
+            "提取考核指标、成果数量、状态和验收方式",
+            "逐项比对重复字段并列出矛盾",
+            "列出有原文支持的否决证据候选；找不到则返回空数组",
+        ],
+        "required_output": {
+            "basic_facts": {},
+            "people": [{"name": "", "age": "", "title": "", "unit": "", "source": "短原文"}],
+            "schedule": [],
+            "budget": [],
+            "metrics_and_deliverables": [],
+            "conflicts": [{"rule_id": "", "fact_a": "", "fact_b": "", "evidence": "两处短原文"}],
+            "negative_evidence_candidates": [{"rule_id": "", "evidence": "短原文", "why_it_matters": ""}],
+            "missing_critical_facts": [],
+            "positive_evidence": [],
+        },
+        "compact_document": compact_document(record.text, dataset_type),
+    }
+    return request_llm_json(system, prompt, max_tokens=1900)
+
+
+def call_llm(
+    record: Record,
+    dataset_type: str,
+    intent: str,
+    checks: list[dict[str, str]],
+    review_note: str | None = None,
+    handoff_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate_rules = select_rules(dataset_type, intent)
+    system = """你是业务文档合规裁决智能体。上游已经生成Spec事实交接单；你必须先核对交接单中的冲突和否决证据，再用压缩原文复核证据，最后匹配规则并输出硬标签。不能根据项目题目热门程度或文件名猜测。evidence必须是文档中的短原文或两处明确矛盾，不得编造。找不到明确否决证据时不得强行判不通过，应谨慎裁决并降低置信度。仅输出一个JSON对象，不输出Markdown。"""
+    prompt = {
+        "task": "根据intent审核文档并返回固定结构结果",
+        "dataset_type": dataset_type,
+        "intent": intent,
+        "record_id": record.id,
+        "candidate_rules": candidate_rules,
+        "deterministic_checks": checks,
+        "spec_handoff": handoff_spec or {},
+        "review_memory": relevant_memory(dataset_type),
+        "decision_policy": [
+            "按顺序完成：核对Spec交接单、优先验证否决证据、检查硬性缺陷、核对正面条件，最后裁决",
+            "先检查blocking规则；命中且证据充分通常判不通过",
+            "未发现否决证据不等于自动通过；通过必须有充分正面证据",
+            "信息缺失影响核心判断时判不通过，不要猜测",
+            "如果Spec中的冲突可由两处原文相互验证，不能因其他字段齐全而忽略",
+            "如果找不到明确、可追溯的否决证据，不得为了命中不通过而编造或扩大解释，应谨慎判断并降低置信度",
+            "matched_rules只放真正用于裁决且有证据的规则",
+        ],
+        "calibration_guardrails": [
+            "签字、公章或日期空白不能单独否决；但审批意见栏只有公章或日期占位，没有同意、不同意、退回、建议等意见内容时，属于审批意见本身空白；立项申请书两级意见均空白应按R-C09审查",
+            "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
+            "同一人员在负责人信息、人员简历和团队表中的年龄、职称、单位必须逐项比对；字段都已填写但取值不一致仍应按R-C03否决",
+            "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
+            "同一笔材料、加工或测试费用若同时计入不同预算科目或在科目与明细中重复列支，应按R-C06审查",
+            "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
+            "非关键格式瑕疵不能替代与当前intent有关的实质否决证据",
+        ],
+        "few_shot_principles": [
+            "若材料只有现成部件组合、通用功能罗列和泛化效益，没有可区分的关键机制或验证指标，应按创新实质不足审查R-A03",
+            "若方案给出明确业务痛点、可区分技术机制、可验证指标且跨章节一致，不能仅因题目普通或签章日期空白否决",
+        ],
+        "required_output": {
+            "label": "通过 或 不通过",
+            "matched_rules": [{"rule_id": "规则编号", "rule_name": "规则名", "evidence": "文档原文证据"}],
+            "reason": "不超过120字",
+            "confidence": "0到1之间的小数",
+        },
+        "compact_document_for_evidence_check": compact_document(record.text, dataset_type),
+    }
+    if review_note:
+        prompt["independent_review"] = review_note
+    return request_llm_json(system, prompt, max_tokens=1400)
 
 
 def heuristic_result(record: Record, dataset_type: str, intent: str, checks: list[dict[str, str]]) -> dict[str, Any]:
@@ -632,7 +718,8 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
     checks = deterministic_checks(record.text, dataset_type, record.extraction_warnings)
     if os.getenv("LLM_API_KEY", "").strip():
         try:
-            raw = call_llm(record, dataset_type, intent, checks)
+            handoff_spec = extract_review_spec(record, dataset_type, intent, checks)
+            raw = call_llm(record, dataset_type, intent, checks, handoff_spec=handoff_spec)
             approval_checks = [check for check in checks if check["rule_id"] == "R-C09"]
             if approval_checks and raw.get("label") == "通过":
                 raw = {
@@ -672,6 +759,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                         "只有找到文档中的明确事实证据才能判不通过；不要根据文件名或已知标签猜测。"
                         f"主审核结果：{first_result}"
                     ),
+                    handoff_spec=handoff_spec,
                 )
                 if critical_result.get("label") == "不通过":
                     raw = call_llm(
@@ -686,6 +774,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                             "立项申请书两级审批意见均无明确结论时属于R-C09。必须引用对应短原文。"
                             f"主审核：{first_result}；反向复核：{json.dumps(critical_result, ensure_ascii=False)}"
                         ),
+                        handoff_spec=handoff_spec,
                     )
                 else:
                     raw = critical_result
@@ -702,6 +791,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                         "如果仍有与intent直接相关、证据充分的实质问题，可以维持不通过；否则改为通过。"
                         f"第一次结果：{first_result}"
                     ),
+                    handoff_spec=handoff_spec,
                 )
             return normalize_result(raw, record, dataset_type, intent, "llm")
         except Exception as exc:

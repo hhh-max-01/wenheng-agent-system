@@ -1,0 +1,42 @@
+[
+  {
+    "memory_id": "M-CROSS-PERSON",
+    "dataset_types": ["计划任务书"],
+    "rule_id": "R-C03",
+    "review_question": "同一人员在负责人信息、个人简历和项目组表中的年龄、职称、单位是否完全一致？",
+    "negative_pattern": "同名人员在不同章节出现不同年龄、职称或单位",
+    "caution": "职位分工不同不等于职称矛盾；必须核对字段含义并引用两处原文。"
+  },
+  {
+    "memory_id": "M-BUDGET-DUPLICATE",
+    "dataset_types": ["计划任务书"],
+    "rule_id": "R-C06",
+    "review_question": "同一笔材料、加工或测试费用是否跨预算科目重复列支？总额、科目与明细是否同口径闭合？",
+    "negative_pattern": "相同费用名称或金额同时出现在不同科目，或科目明细重复计入总额",
+    "caution": "费用性明细不能直接与含资本性经费的总额比较；只有同口径重复才是否决证据。"
+  },
+  {
+    "memory_id": "M-SCHEDULE-RESULT",
+    "dataset_types": ["计划任务书"],
+    "rule_id": "R-C05",
+    "review_question": "项目期限、各阶段日期和最终验收时间是否覆盖完整且相互一致？",
+    "negative_pattern": "阶段日期超出期限、存在空档，或最终阶段没有验收活动",
+    "caution": "阶段名称不同不等于缺失，应以日期覆盖和验收活动为准。"
+  },
+  {
+    "memory_id": "M-APPLICATION-SUBSTANCE",
+    "dataset_types": ["立项申请书"],
+    "rule_id": "R-A03",
+    "review_question": "创新点是否给出可区分技术机制和验证指标，而不是现成部件的简单拼装？",
+    "negative_pattern": "只有通用功能、部件清单和泛化效益，没有关键机制或验证路径",
+    "caution": "不能仅因题目常见否决，必须引用方案原文。"
+  },
+  {
+    "memory_id": "M-EVIDENCE-FIRST",
+    "dataset_types": ["通用"],
+    "rule_id": "R-G02",
+    "review_question": "每项不通过结论是否有短原文或两处可核对事实？",
+    "negative_pattern": "结论无法追溯到文档事实",
+    "caution": "找不到明确证据时不得猜标签，应降低置信度并谨慎裁决。"
+  }
+]
