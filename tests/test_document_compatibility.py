@@ -109,6 +109,33 @@ class DocumentCompatibilityTests(unittest.TestCase):
         checks = server.deterministic_checks(text, "立项申请书")
         self.assertTrue(any(check["rule_id"] == "R-C09" for check in checks))
 
+    def test_plan_pass_receives_independent_consistency_review(self) -> None:
+        record = server.Record("sample", "sample.doc", "项目材料正文完整")
+        first_pass = {
+            "label": "通过",
+            "matched_rules": [],
+            "reason": "字段齐全",
+            "confidence": 0.95,
+        }
+        conflict = {
+            "label": "不通过",
+            "matched_rules": [{
+                "rule_id": "R-C03",
+                "rule_name": "跨章节信息一致性",
+                "evidence": "负责人信息为工程师，项目组表为高级技师",
+            }],
+            "reason": "同一人员职称前后不一致",
+            "confidence": 0.96,
+        }
+        with patch.dict(server.os.environ, {"LLM_API_KEY": "test-key"}), patch.object(
+            server, "deterministic_checks", return_value=[]
+        ), patch.object(server, "call_llm", side_effect=[first_pass, conflict, conflict]) as mocked:
+            result = server.judge_one(record, "计划任务书", "判断项目是否通过")
+
+        self.assertEqual(result["label"], "不通过")
+        self.assertEqual(result["matched_rules"][0]["rule_id"], "R-C03")
+        self.assertIn("年龄、职称、单位", mocked.call_args_list[1].kwargs["review_note"])
+
 
 if __name__ == "__main__":
     unittest.main()
