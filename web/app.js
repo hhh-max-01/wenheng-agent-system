@@ -51,12 +51,14 @@ function showState(name) {
 function renderResults(payload) {
   lastPayload = payload;
   const pass = payload.results.filter(item => item.label === '通过').length;
-  const fail = payload.results.length - pass;
-  resultSummary.innerHTML = `<span>共审核 <b>${payload.count}</b> 条</span><span>通过 <b>${pass}</b> · 不通过 <b>${fail}</b></span>`;
+  const fail = payload.results.filter(item => item.label === '不通过').length;
+  const errors = payload.results.filter(item => item.label === '处理失败').length;
+  const errorSummary = errors ? ` · 处理失败 <b>${errors}</b>` : '';
+  resultSummary.innerHTML = `<span>共处理 <b>${payload.count}</b> 条</span><span>通过 <b>${pass}</b> · 不通过 <b>${fail}</b>${errorSummary}</span>`;
   resultsRoot.innerHTML = payload.results.map(item => {
     const rules = item.matched_rules.length
       ? item.matched_rules.map(rule => `<div class="rule"><b>${escapeHtml(rule.rule_id)} · ${escapeHtml(rule.rule_name)}</b><p>${escapeHtml(rule.evidence)}</p></div>`).join('')
-      : '<div class="no-rule">未发现有充分证据支持的否决规则</div>';
+      : `<div class="no-rule">${item.label === '处理失败' ? '文件未进入模型审核' : '未发现有充分证据支持的否决规则'}</div>`;
     const warning = item.warning ? `<div class="no-rule">处理提示：${escapeHtml(item.warning)}</div>` : '';
     return `<article class="result-card">
       <div class="result-head"><div><h3>${escapeHtml(item.id)}</h3><small>${escapeHtml(item.source_name)} · ${escapeHtml(item.mode)}</small></div><span class="label ${item.label === '通过' ? 'pass' : 'fail'}">${escapeHtml(item.label)}</span></div>
