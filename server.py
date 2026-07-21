@@ -521,7 +521,9 @@ def call_llm(
         "calibration_guardrails": [
             "签字、公章或日期空白不能单独否决；但审批意见栏只有公章或日期占位，没有同意、不同意、退回、建议等意见内容时，属于审批意见本身空白；立项申请书两级意见均空白应按R-C09审查",
             "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
+            "同一人员在负责人信息、人员简历和团队表中的年龄、职称、单位必须逐项比对；字段都已填写但取值不一致仍应按R-C03否决",
             "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
+            "同一笔材料、加工或测试费用若同时计入不同预算科目或在科目与明细中重复列支，应按R-C06审查",
             "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
             "非关键格式瑕疵不能替代与当前intent有关的实质否决证据",
         ],
@@ -646,8 +648,19 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                     "reason": "立项申请书的审批意见缺少明确结论，无法确认已满足立项审批要求。",
                     "confidence": 0.96,
                 }
-            if raw.get("label") == "通过" and not checks and dataset_type == "立项申请书":
+            if raw.get("label") == "通过" and not checks:
                 first_result = json.dumps(raw, ensure_ascii=False)
+                if dataset_type == "计划任务书":
+                    reverse_focus = (
+                        "重点逐项比对同一人员在负责人信息、人员简历和项目组表中的年龄、职称、单位，"
+                        "核对项目期限与各阶段日期、成果数量与状态、预算总额与科目明细。"
+                        "字段齐全不代表取值一致；同一费用跨科目或在科目与明细中重复列支属于预算问题。"
+                    )
+                else:
+                    reverse_focus = (
+                        "重点检查问题与方案是否真正匹配、创新点是否只是现成设备或模块的简单拼装、"
+                        "技术机制和验证指标是否足以支撑声称效果，以及跨章节事实是否一致。"
+                    )
                 critical_result = call_llm(
                     record,
                     dataset_type,
@@ -655,8 +668,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                     checks,
                     review_note=(
                         "这是一次防漏判的独立反向复核。不要因为栏目齐全就自动通过。"
-                        "重点检查问题与方案是否真正匹配、创新点是否只是现成设备或模块的简单拼装、"
-                        "技术机制和验证指标是否足以支撑声称效果，以及跨章节事实是否一致。"
+                        f"{reverse_focus}"
                         "只有找到文档中的明确事实证据才能判不通过；不要根据文件名或已知标签猜测。"
                         f"主审核结果：{first_result}"
                     ),
@@ -669,8 +681,9 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                         checks,
                         review_note=(
                             "主审核与反向复核结论冲突，请作为独立裁决智能体重新核对原文证据。"
-                            "不能用签字、公章或日期空白单独否决；但两级审批意见均无明确结论时属于R-C09。也不能因栏目齐全自动通过。"
-                            "若存在问题方案不匹配、创新实质不足或关键事实矛盾，必须引用对应短原文并匹配规则。"
+                            "不能用签字、公章或日期空白单独否决，也不能因栏目齐全自动通过。"
+                            "若同一人员年龄、职称或单位前后矛盾，或同一费用重复列支，应分别按R-C03、R-C06裁决；"
+                            "立项申请书两级审批意见均无明确结论时属于R-C09。必须引用对应短原文。"
                             f"主审核：{first_result}；反向复核：{json.dumps(critical_result, ensure_ascii=False)}"
                         ),
                     )
