@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import csv
 import io
 import json
 import os
 import re
+import shutil
+import struct
+import subprocess
 import tempfile
 import urllib.error
 import urllib.request
+import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -17,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from lxml import etree
 from pypdf import PdfReader
 
 
@@ -47,6 +54,7 @@ class Record:
     id: str
     source_name: str
     text: str
+    extraction_warnings: tuple[str, ...] = ()
 
 
 def clean_text(text: str) -> str:
@@ -56,19 +64,177 @@ def clean_text(text: str) -> str:
     return text.strip()[:MAX_TEXT_CHARS]
 
 
-def extract_docx(data: bytes) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as handle:
-        handle.write(data)
-        temp_path = Path(handle.name)
+def _read_zip_member_without_crc(data: bytes, info: zipfile.ZipInfo) -> bytes:
+    """Recover a ZIP member whose payload is intact but CRC metadata is wrong."""
+    header = data[info.header_offset:info.header_offset + 30]
+    if len(header) != 30:
+        raise zipfile.BadZipFile("DOCX成员头不完整")
+    signature, *values = struct.unpack("<IHHHHHIIIHH", header)
+    if signature != 0x04034B50:
+        raise zipfile.BadZipFile("DOCX成员头无效")
+    filename_length, extra_length = values[-2:]
+    payload_start = info.header_offset + 30 + filename_length + extra_length
+    compressed = data[payload_start:payload_start + info.compress_size]
+    if len(compressed) != info.compress_size:
+        raise zipfile.BadZipFile("DOCX成员数据不完整")
+    if info.compress_type == zipfile.ZIP_STORED:
+        payload = compressed
+    elif info.compress_type == zipfile.ZIP_DEFLATED:
+        payload = zlib.decompress(compressed, -zlib.MAX_WBITS)
+    else:
+        raise zipfile.BadZipFile(f"不支持修复的DOCX压缩方式：{info.compress_type}")
+    return payload
+
+
+def repair_docx_crc(data: bytes) -> bytes:
+    """Rebuild a DOCX when one or more ZIP entries only have a bad CRC value."""
+    if not zipfile.is_zipfile(io.BytesIO(data)):
+        raise zipfile.BadZipFile("文件不是有效的DOCX压缩包")
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data), "r") as source, zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            try:
+                payload = source.read(info)
+            except zipfile.BadZipFile as exc:
+                if "Bad CRC-32" not in str(exc):
+                    raise
+                payload = _read_zip_member_without_crc(data, info)
+            target.writestr(info, payload)
+    repaired = output.getvalue()
+    with zipfile.ZipFile(io.BytesIO(repaired), "r") as verified:
+        if verified.testzip() is not None:
+            raise zipfile.BadZipFile("DOCX自动修复后仍未通过完整性检查")
+    return repaired
+
+
+def _extract_docx_archive(data: bytes) -> str:
+    doc = Document(io.BytesIO(data))
+    blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = []
+            for cell in row.cells:
+                value = cell.text.strip().replace("\n", " / ")
+                if value and (not cells or value != cells[-1]):
+                    cells.append(value)
+            if cells:
+                blocks.append(" | ".join(cells))
+    text = clean_text("\n".join(blocks))
+    if not text:
+        raise ValueError("DOCX中没有读取到可审核文字")
+    return text
+
+
+def extract_docx_with_status(data: bytes) -> tuple[str, tuple[str, ...]]:
     try:
-        doc = Document(temp_path)
-        blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                blocks.append(" | ".join(cell.text.strip().replace("\n", " / ") for cell in row.cells))
-        return clean_text("\n".join(blocks))
-    finally:
-        temp_path.unlink(missing_ok=True)
+        return _extract_docx_archive(data), ()
+    except (zipfile.BadZipFile, etree.XMLSyntaxError, KeyError):
+        try:
+            return _extract_docx_archive(repair_docx_crc(data)), ("DOCX压缩包校验异常，系统已完整修复后读取",)
+        except (zipfile.BadZipFile, ValueError, KeyError, zlib.error, etree.XMLSyntaxError):
+            office_repaired = repair_docx_with_office(data)
+            if office_repaired is not None:
+                try:
+                    return _extract_docx_archive(office_repaired), ("DOCX结构异常，系统已使用文档转换器修复后读取",)
+                except (zipfile.BadZipFile, ValueError, KeyError, etree.XMLSyntaxError):
+                    pass
+            try:
+                return recover_corrupt_docx_text(data), ("DOCX正文结构损坏，仅恢复到部分可读内容，材料完整性无法确认",)
+            except (zipfile.BadZipFile, ValueError, KeyError, zlib.error, etree.XMLSyntaxError) as exc:
+                raise ValueError("DOCX正文结构损坏且无法恢复，请在Word中打开后使用“打开并修复”，再另存为新文件") from exc
+
+
+def extract_docx(data: bytes) -> str:
+    return extract_docx_with_status(data)[0]
+
+
+def find_office_converter() -> str | None:
+    configured = os.getenv("LIBREOFFICE_PATH", "").strip()
+    if configured and Path(configured).is_file():
+        return configured
+    for command in ("libreoffice", "soffice"):
+        found = shutil.which(command)
+        if found:
+            return found
+    return None
+
+
+def _run_office_conversion(data: bytes, input_suffix: str) -> bytes | None:
+    converter = find_office_converter()
+    if not converter:
+        return None
+    with tempfile.TemporaryDirectory(prefix="office-review-") as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        input_dir = temp_dir / "input"
+        output_dir = temp_dir / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        source_path = input_dir / f"uploaded{input_suffix}"
+        output_path = output_dir / "uploaded.docx"
+        profile_uri = (temp_dir / "lo-profile").resolve().as_uri()
+        source_path.write_bytes(data)
+        completed = subprocess.run(
+            [
+                converter,
+                "--headless",
+                "--nologo",
+                "--nodefault",
+                "--nofirststartwizard",
+                f"-env:UserInstallation={profile_uri}",
+                "--convert-to",
+                "docx",
+                "--outdir",
+                str(output_dir),
+                str(source_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0 or not output_path.exists():
+            return None
+        return output_path.read_bytes()
+
+
+def repair_docx_with_office(data: bytes) -> bytes | None:
+    try:
+        return _run_office_conversion(data, ".docx")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def recover_corrupt_docx_text(data: bytes) -> str:
+    """Best-effort text recovery for a DOCX whose document.xml is damaged."""
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        info = archive.getinfo("word/document.xml")
+        try:
+            document_xml = archive.read(info)
+        except zipfile.BadZipFile:
+            document_xml = _read_zip_member_without_crc(data, info)
+    safe_xml = document_xml.decode("utf-8", errors="replace").encode("utf-8")
+    parser = etree.XMLParser(recover=True, huge_tree=False, resolve_entities=False)
+    root = etree.fromstring(safe_xml, parser)
+    text_nodes = [str(value).strip() for value in root.xpath('//*[local-name()="t"]/text()')]
+    text = clean_text("\n".join(value for value in text_nodes if value))
+    if len(text) < 200:
+        raise ValueError("损坏DOCX中可恢复的文字不足")
+    return text
+
+
+def extract_doc(data: bytes) -> str:
+    if not find_office_converter():
+        raise ValueError("服务器尚未安装旧版DOC转换组件，请联系管理员完成部署")
+    try:
+        converted = _run_office_conversion(data, ".doc")
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("旧版DOC转换超时，请确认文件未加密且可以正常打开") from exc
+    if converted is None:
+        raise ValueError("旧版DOC无法转换，请确认文件未加密、未损坏且不是仅修改了扩展名")
+    return extract_docx(converted)
 
 
 def extract_pdf(data: bytes) -> str:
@@ -83,11 +249,14 @@ def records_from_file(item: dict[str, Any]) -> list[Record]:
     stem = Path(name).stem
 
     if suffix == ".docx":
-        return [Record(stem, name, extract_docx(raw))]
+        if raw.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            return [Record(stem, name, extract_doc(raw))]
+        text, warnings = extract_docx_with_status(raw)
+        return [Record(stem, name, text, warnings)]
     if suffix == ".pdf":
         return [Record(stem, name, extract_pdf(raw))]
     if suffix == ".doc":
-        raise ValueError(f"{name} 是旧版 DOC，请先用 Word 另存为 DOCX 后上传")
+        return [Record(stem, name, extract_doc(raw))]
     if suffix in {".txt", ".md"}:
         return [Record(stem, name, clean_text(raw.decode("utf-8-sig", errors="replace")))]
     if suffix == ".json":
@@ -115,8 +284,15 @@ def snippet(text: str, pattern: str, width: int = 95) -> str | None:
     return text[start:end].replace("\n", " ").strip()
 
 
-def deterministic_checks(text: str, dataset_type: str) -> list[dict[str, str]]:
+def deterministic_checks(
+    text: str,
+    dataset_type: str,
+    extraction_warnings: tuple[str, ...] = (),
+) -> list[dict[str, str]]:
     checks: list[dict[str, str]] = []
+    for warning in extraction_warnings:
+        if "仅恢复到部分" in warning or "完整性无法确认" in warning:
+            checks.append({"rule_id": "R-C02", "message": "文档损坏导致内容不完整", "evidence": warning})
     patterns = [
         ("R-C01", r"填写说明|删除本提示|待补充|请在此处填写", "存在未清理的模板提示或占位内容"),
         ("R-C04", r"百分之|准确率\s*\|\s*\|", "考核指标可能缺失、格式异常或不可量化"),
@@ -232,17 +408,22 @@ def call_llm(
         "candidate_rules": candidate_rules,
         "deterministic_checks": checks,
         "decision_policy": [
+            "按顺序完成：提取关键事实、检查硬性缺陷、评估问题方案匹配、评估创新实质、核对一致性，最后裁决",
             "先检查blocking规则；命中且证据充分通常判不通过",
             "未发现否决证据不等于自动通过；通过必须有充分正面证据",
             "信息缺失影响核心判断时判不通过，不要猜测",
             "matched_rules只放真正用于裁决且有证据的规则",
         ],
         "calibration_guardrails": [
-            "签字或承诺书日期留空本身不属于模板残留，除非intent明确审核签章完整性",
+            "审批意见、签字、公章或日期空白不能单独否决，除非intent明确要求审核已完成审批或签章完整性",
             "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
             "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
             "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
             "非关键格式瑕疵不能替代与当前intent有关的实质否决证据",
+        ],
+        "few_shot_principles": [
+            "若材料只有现成部件组合、通用功能罗列和泛化效益，没有可区分的关键机制或验证指标，应按创新实质不足审查R-A03",
+            "若方案给出明确业务痛点、可区分技术机制、可验证指标且跨章节一致，不能仅因题目普通或签章日期空白否决",
         ],
         "required_output": {
             "label": "通过 或 不通过",
@@ -325,7 +506,7 @@ def normalize_result(raw: dict[str, Any], record: Record, dataset_type: str, int
         confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.5))))
     except (TypeError, ValueError):
         confidence = 0.5
-    return {
+    result = {
         "id": record.id,
         "source_name": record.source_name,
         "dataset_type": dataset_type,
@@ -336,14 +517,47 @@ def normalize_result(raw: dict[str, Any], record: Record, dataset_type: str, int
         "confidence": confidence,
         "mode": mode,
     }
+    if record.extraction_warnings:
+        result["warning"] = "；".join(record.extraction_warnings)
+    return result
 
 
 def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
-    checks = deterministic_checks(record.text, dataset_type)
+    checks = deterministic_checks(record.text, dataset_type, record.extraction_warnings)
     if os.getenv("LLM_API_KEY", "").strip():
         try:
             raw = call_llm(record, dataset_type, intent, checks)
-            if raw.get("label") == "不通过" and not checks:
+            if raw.get("label") == "通过" and not checks and dataset_type == "立项申请书":
+                first_result = json.dumps(raw, ensure_ascii=False)
+                critical_result = call_llm(
+                    record,
+                    dataset_type,
+                    intent,
+                    checks,
+                    review_note=(
+                        "这是一次防漏判的独立反向复核。不要因为栏目齐全就自动通过。"
+                        "重点检查问题与方案是否真正匹配、创新点是否只是现成设备或模块的简单拼装、"
+                        "技术机制和验证指标是否足以支撑声称效果，以及跨章节事实是否一致。"
+                        "只有找到文档中的明确事实证据才能判不通过；不要根据文件名或已知标签猜测。"
+                        f"主审核结果：{first_result}"
+                    ),
+                )
+                if critical_result.get("label") == "不通过":
+                    raw = call_llm(
+                        record,
+                        dataset_type,
+                        intent,
+                        checks,
+                        review_note=(
+                            "主审核与反向复核结论冲突，请作为独立裁决智能体重新核对原文证据。"
+                            "不能用审批栏、签字、公章或日期空白单独否决；也不能因栏目齐全自动通过。"
+                            "若存在问题方案不匹配、创新实质不足或关键事实矛盾，必须引用对应短原文并匹配规则。"
+                            f"主审核：{first_result}；反向复核：{json.dumps(critical_result, ensure_ascii=False)}"
+                        ),
+                    )
+                else:
+                    raw = critical_result
+            elif raw.get("label") == "不通过" and not checks:
                 first_result = json.dumps(raw, ensure_ascii=False)
                 raw = call_llm(
                     record,
@@ -352,7 +566,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                     checks,
                     review_note=(
                         "这是一次反误杀独立复核。程序未发现高置信度结构问题。"
-                        "请质疑第一次结论是否把签字日期空白、跨章节内容位置或不同预算口径误当成否决证据。"
+                        "请质疑第一次结论是否把审批栏或签字日期空白、跨章节内容位置或不同预算口径误当成否决证据。"
                         "如果仍有与intent直接相关、证据充分的实质问题，可以维持不通过；否则改为通过。"
                         f"第一次结果：{first_result}"
                     ),
@@ -361,7 +575,8 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
         except Exception as exc:
             fallback = heuristic_result(record, dataset_type, intent, checks)
             result = normalize_result(fallback, record, dataset_type, intent, "fallback")
-            result["warning"] = f"模型调用失败，已使用本地预检查：{str(exc)[:160]}"
+            model_warning = f"模型调用失败，已使用本地预检查：{str(exc)[:160]}"
+            result["warning"] = "；".join(filter(None, [result.get("warning"), model_warning]))
             return result
     return normalize_result(heuristic_result(record, dataset_type, intent, checks), record, dataset_type, intent, "demo")
 
