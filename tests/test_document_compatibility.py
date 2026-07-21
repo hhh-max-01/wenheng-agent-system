@@ -74,6 +74,14 @@ class DocumentCompatibilityTests(unittest.TestCase):
         text = server._extract_docx_xml(make_docx("底层XML可以读取的正文"))
         self.assertIn("底层XML可以读取的正文", text)
 
+    def test_compact_document_keeps_key_sections_and_both_ends(self) -> None:
+        text = "文档开头\n" + ("普通说明内容\n" * 5000) + "预算总额8万元，材料费重复列支\n文档结尾"
+        compacted = server.compact_document(text, "计划任务书", max_chars=4000)
+        self.assertLessEqual(len(compacted), 4000)
+        self.assertIn("文档开头", compacted)
+        self.assertIn("预算总额8万元，材料费重复列支", compacted)
+        self.assertIn("文档结尾", compacted)
+
     def test_blank_approval_field_alone_is_not_a_deterministic_rejection(self) -> None:
         text = "研究内容完整\n技术关键点及创新点完整\n应用前景明确\n申请部门/单位意见：（公章） 年 月 日"
         checks = server.deterministic_checks(text, "立项申请书")
@@ -129,7 +137,9 @@ class DocumentCompatibilityTests(unittest.TestCase):
         }
         with patch.dict(server.os.environ, {"LLM_API_KEY": "test-key"}), patch.object(
             server, "deterministic_checks", return_value=[]
-        ), patch.object(server, "call_llm", side_effect=[first_pass, conflict, conflict]) as mocked:
+        ), patch.object(server, "extract_review_spec", return_value={"conflicts": []}), patch.object(
+            server, "call_llm", side_effect=[first_pass, conflict, conflict]
+        ) as mocked:
             result = server.judge_one(record, "计划任务书", "判断项目是否通过")
 
         self.assertEqual(result["label"], "不通过")
