@@ -99,6 +99,16 @@ class DocumentCompatibilityTests(unittest.TestCase):
         checks = server.deterministic_checks(text, "立项申请书")
         self.assertFalse(any(check["rule_id"] == "R-C09" for check in checks))
 
+    def test_application_unit_approval_heading_is_supported(self) -> None:
+        text = (
+            "研究内容完整\n技术关键点及创新点完整\n应用前景明确\n"
+            "申请部门/单位意见：（公章） 年 月 日\n"
+            "申请单位科技管理部门意见：（公章） 年 月 日\n"
+            "注：审批通过后打印。"
+        )
+        checks = server.deterministic_checks(text, "立项申请书")
+        self.assertTrue(any(check["rule_id"] == "R-C09" for check in checks))
+
 
 if __name__ == "__main__":
     unittest.main()
