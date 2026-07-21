@@ -30,7 +30,7 @@
       <div class="panel input-panel">
         <div class="panel-heading">
           <div><span class="step">01</span><h2>设置审核任务</h2></div>
-          <p>支持多文件或包含多条记录的 JSON / CSV</p>
+          <p>支持 DOC、DOCX、PDF，多文件或包含多条记录的 JSON / CSV</p>
         </div>
 
         <form id="judgeForm">
@@ -54,10 +54,10 @@
           </div>
 
           <label class="upload" id="dropzone" for="files">
-            <input id="files" type="file" multiple accept=".docx,.pdf,.json,.csv,.txt,.md">
+            <input id="files" type="file" multiple accept=".doc,.docx,.pdf,.json,.csv,.txt,.md">
             <span class="upload-icon">↑</span>
             <strong>拖放文件到这里，或点击选择</strong>
-            <small>DOCX、PDF、JSON、CSV、TXT、MD · 单次总量不超过 18MB</small>
+            <small>DOC、DOCX、PDF、JSON、CSV、TXT、MD · 单次总量不超过 18MB</small>
           </label>
           <ul id="fileList" class="file-list" aria-live="polite"></ul>
 

@@ -25,7 +25,7 @@ function updateIntentCount() {
 }
 
 function updateFiles(files) {
-  const allowed = ['docx', 'pdf', 'json', 'csv', 'txt', 'md'];
+  const allowed = ['doc', 'docx', 'pdf', 'json', 'csv', 'txt', 'md'];
   selectedFiles = [...files].filter(file => allowed.includes(file.name.split('.').pop().toLowerCase()));
   fileList.innerHTML = selectedFiles.map(file => `<li><span>${escapeHtml(file.name)}</span><b>${(file.size / 1024).toFixed(1)} KB</b></li>`).join('');
 }
@@ -57,9 +57,10 @@ function renderResults(payload) {
     const rules = item.matched_rules.length
       ? item.matched_rules.map(rule => `<div class="rule"><b>${escapeHtml(rule.rule_id)} · ${escapeHtml(rule.rule_name)}</b><p>${escapeHtml(rule.evidence)}</p></div>`).join('')
       : '<div class="no-rule">未发现有充分证据支持的否决规则</div>';
+    const warning = item.warning ? `<div class="no-rule">处理提示：${escapeHtml(item.warning)}</div>` : '';
     return `<article class="result-card">
       <div class="result-head"><div><h3>${escapeHtml(item.id)}</h3><small>${escapeHtml(item.source_name)} · ${escapeHtml(item.mode)}</small></div><span class="label ${item.label === '通过' ? 'pass' : 'fail'}">${escapeHtml(item.label)}</span></div>
-      <div class="result-body"><p class="reason">${escapeHtml(item.reason)}</p><div class="confidence">置信度 ${(Number(item.confidence) * 100).toFixed(0)}%</div>${rules}</div>
+      <div class="result-body"><p class="reason">${escapeHtml(item.reason)}</p><div class="confidence">置信度 ${(Number(item.confidence) * 100).toFixed(0)}%</div>${warning}${rules}</div>
     </article>`;
   }).join('');
   showState('results');
