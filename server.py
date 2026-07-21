@@ -23,8 +23,16 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.exceptions import InvalidSpanError
 from lxml import etree
 from pypdf import PdfReader
+
+try:
+    from office_oxide import extract_text as oxide_extract_text
+    from office_oxide import to_markdown as oxide_to_markdown
+except ImportError:  # Local development can still use the LibreOffice fallback.
+    oxide_extract_text = None
+    oxide_to_markdown = None
 
 
 ROOT = Path(__file__).resolve().parent
@@ -110,15 +118,53 @@ def repair_docx_crc(data: bytes) -> bytes:
 def _extract_docx_archive(data: bytes) -> str:
     doc = Document(io.BytesIO(data))
     blocks = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    for table in doc.tables:
-        for row in table.rows:
-            cells = []
-            for cell in row.cells:
-                value = cell.text.strip().replace("\n", " / ")
-                if value and (not cells or value != cells[-1]):
-                    cells.append(value)
-            if cells:
-                blocks.append(" | ".join(cells))
+    try:
+        for table in doc.tables:
+            for row in table.rows:
+                cells = []
+                for cell in row.cells:
+                    value = cell.text.strip().replace("\n", " / ")
+                    if value and value not in cells:
+                        cells.append(value)
+                if cells:
+                    blocks.append(" | ".join(cells))
+    except InvalidSpanError:
+        return _extract_docx_xml(data)
+    text = clean_text("\n".join(blocks))
+    if not text:
+        raise ValueError("DOCX中没有读取到可审核文字")
+    return text
+
+
+def _extract_docx_xml(data: bytes) -> str:
+    """Read paragraphs and table cells without relying on python-docx's table grid."""
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        document_xml = archive.read("word/document.xml")
+    parser = etree.XMLParser(recover=False, huge_tree=False, resolve_entities=False)
+    root = etree.fromstring(document_xml, parser)
+    body_nodes = root.xpath('//*[local-name()="body"]')
+    if not body_nodes:
+        raise ValueError("DOCX中没有找到正文结构")
+    blocks: list[str] = []
+    for block in body_nodes[0]:
+        block_name = etree.QName(block).localname
+        if block_name == "p":
+            value = "".join(block.xpath('.//*[local-name()="t"]/text()')).strip()
+            if value:
+                blocks.append(value)
+        elif block_name == "tbl":
+            for row in block.xpath('./*[local-name()="tr"]'):
+                cells: list[str] = []
+                for cell in row.xpath('./*[local-name()="tc"]'):
+                    paragraphs = [
+                        "".join(paragraph.xpath('.//*[local-name()="t"]/text()')).strip()
+                        for paragraph in cell.xpath('./*[local-name()="p"]')
+                    ]
+                    value = " / ".join(part for part in paragraphs if part)
+                    if value and value not in cells:
+                        cells.append(value)
+                if cells:
+                    blocks.append(" | ".join(cells))
     text = clean_text("\n".join(blocks))
     if not text:
         raise ValueError("DOCX中没有读取到可审核文字")
@@ -225,16 +271,49 @@ def recover_corrupt_docx_text(data: bytes) -> str:
     return text
 
 
-def extract_doc(data: bytes) -> str:
+def extract_doc_with_oxide(data: bytes) -> str:
+    if oxide_extract_text is None and oxide_to_markdown is None:
+        raise RuntimeError("Office Oxide未安装")
+    with tempfile.TemporaryDirectory(prefix="oxide-review-") as temp_dir_name:
+        source_path = Path(temp_dir_name) / "uploaded.doc"
+        source_path.write_bytes(data)
+        candidates: list[str] = []
+        for extractor in (oxide_to_markdown, oxide_extract_text):
+            if extractor is None:
+                continue
+            try:
+                value = clean_text(str(extractor(str(source_path)) or ""))
+                if value:
+                    candidates.append(value)
+            except Exception:
+                continue
+    if not candidates:
+        raise ValueError("Office Oxide未读取到正文")
+    text = max(candidates, key=lambda value: (sum(key in value for key in ("研究内容", "预期成果", "创新点", "审批意见")), len(value)))
+    if len(text) < 200:
+        raise ValueError("Office Oxide提取的可审核文字不足")
+    return text
+
+
+def extract_doc_with_status(data: bytes) -> tuple[str, tuple[str, ...]]:
+    try:
+        return extract_doc_with_oxide(data), ("原始DOC由Office Oxide直接读取，未改变文件格式",)
+    except (RuntimeError, ValueError, OSError):
+        pass
     if not find_office_converter():
-        raise ValueError("服务器尚未安装旧版DOC转换组件，请联系管理员完成部署")
+        raise ValueError("服务器未能直接读取旧版DOC，且尚未安装LibreOffice备用组件")
     try:
         converted = _run_office_conversion(data, ".doc")
     except subprocess.TimeoutExpired as exc:
         raise ValueError("旧版DOC转换超时，请确认文件未加密且可以正常打开") from exc
     if converted is None:
         raise ValueError("旧版DOC无法转换，请确认文件未加密、未损坏且不是仅修改了扩展名")
-    return extract_docx(converted)
+    text, warnings = extract_docx_with_status(converted)
+    return text, ("Office Oxide未能直接读取，系统已使用LibreOffice临时转换后审核",) + warnings
+
+
+def extract_doc(data: bytes) -> str:
+    return extract_doc_with_status(data)[0]
 
 
 def extract_pdf(data: bytes) -> str:
@@ -250,13 +329,15 @@ def records_from_file(item: dict[str, Any]) -> list[Record]:
 
     if suffix == ".docx":
         if raw.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-            return [Record(stem, name, extract_doc(raw))]
+            text, warnings = extract_doc_with_status(raw)
+            return [Record(stem, name, text, warnings)]
         text, warnings = extract_docx_with_status(raw)
         return [Record(stem, name, text, warnings)]
     if suffix == ".pdf":
         return [Record(stem, name, extract_pdf(raw))]
     if suffix == ".doc":
-        return [Record(stem, name, extract_doc(raw))]
+        text, warnings = extract_doc_with_status(raw)
+        return [Record(stem, name, text, warnings)]
     if suffix in {".txt", ".md"}:
         return [Record(stem, name, clean_text(raw.decode("utf-8-sig", errors="replace")))]
     if suffix == ".json":
@@ -304,6 +385,26 @@ def deterministic_checks(
         evidence = snippet(text, pattern)
         if evidence:
             checks.append({"rule_id": rule_id, "message": message, "evidence": evidence})
+
+    if dataset_type == "立项申请书":
+        approval_headings = ["申请部门/单位意见", "直属单位科技管理部门意见"]
+        blank_approval_sections: list[str] = []
+        for index, heading in enumerate(approval_headings):
+            next_heading = approval_headings[index + 1] if index + 1 < len(approval_headings) else None
+            end_pattern = re.escape(next_heading) if next_heading else r"注[：:]|廉洁及科研诚信承诺书|$"
+            section = re.search(
+                rf"{re.escape(heading)}[：:]?(.*?)(?={end_pattern})",
+                text,
+                re.S,
+            )
+            if section and not re.search(r"同意|不同意|不予|退回|经审核|批准|建议", section.group(1)):
+                blank_approval_sections.append(heading)
+        if len(blank_approval_sections) == len(approval_headings):
+            checks.append({
+                "rule_id": "R-C09",
+                "message": "两级审批意见均未填写明确结论",
+                "evidence": "“申请部门/单位意见”和“直属单位科技管理部门意见”均只有公章或日期占位，未填写明确审批意见",
+            })
 
     if dataset_type == "计划任务书":
         if "项目执行期限" not in text and "项目起止时间" not in text:
@@ -415,7 +516,7 @@ def call_llm(
             "matched_rules只放真正用于裁决且有证据的规则",
         ],
         "calibration_guardrails": [
-            "审批意见、签字、公章或日期空白不能单独否决，除非intent明确要求审核已完成审批或签章完整性",
+            "签字、公章或日期空白不能单独否决；但立项申请书的两级审批意见均没有任何明确结论时，应按R-C09审查",
             "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
             "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
             "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
@@ -527,6 +628,21 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
     if os.getenv("LLM_API_KEY", "").strip():
         try:
             raw = call_llm(record, dataset_type, intent, checks)
+            approval_checks = [check for check in checks if check["rule_id"] == "R-C09"]
+            if approval_checks and raw.get("label") == "通过":
+                raw = {
+                    "label": "不通过",
+                    "matched_rules": [
+                        {
+                            "rule_id": "R-C09",
+                            "rule_name": "审批意见有效性",
+                            "evidence": check["evidence"],
+                        }
+                        for check in approval_checks
+                    ],
+                    "reason": "立项申请书的审批意见缺少明确结论，无法确认已满足立项审批要求。",
+                    "confidence": 0.96,
+                }
             if raw.get("label") == "通过" and not checks and dataset_type == "立项申请书":
                 first_result = json.dumps(raw, ensure_ascii=False)
                 critical_result = call_llm(
@@ -550,7 +666,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                         checks,
                         review_note=(
                             "主审核与反向复核结论冲突，请作为独立裁决智能体重新核对原文证据。"
-                            "不能用审批栏、签字、公章或日期空白单独否决；也不能因栏目齐全自动通过。"
+                            "不能用签字、公章或日期空白单独否决；但两级审批意见均无明确结论时属于R-C09。也不能因栏目齐全自动通过。"
                             "若存在问题方案不匹配、创新实质不足或关键事实矛盾，必须引用对应短原文并匹配规则。"
                             f"主审核：{first_result}；反向复核：{json.dumps(critical_result, ensure_ascii=False)}"
                         ),
@@ -566,7 +682,7 @@ def judge_one(record: Record, dataset_type: str, intent: str) -> dict[str, Any]:
                     checks,
                     review_note=(
                         "这是一次反误杀独立复核。程序未发现高置信度结构问题。"
-                        "请质疑第一次结论是否把审批栏或签字日期空白、跨章节内容位置或不同预算口径误当成否决证据。"
+                        "请质疑第一次结论是否把签字日期空白、跨章节内容位置或不同预算口径误当成否决证据。"
                         "如果仍有与intent直接相关、证据充分的实质问题，可以维持不通过；否则改为通过。"
                         f"第一次结果：{first_result}"
                     ),
@@ -625,14 +741,32 @@ class AppHandler(SimpleHTTPRequestHandler):
                 raise ValueError("请输入判断 intent")
             if not isinstance(files, list) or not files:
                 raise ValueError("请至少上传一个文件")
-            records: list[Record] = []
+            work_items: list[Record | dict[str, Any]] = []
             for item in files:
-                records.extend(records_from_file(item))
-            if not records:
+                try:
+                    work_items.extend(records_from_file(item))
+                except Exception as exc:
+                    name = str(item.get("name") or "uploaded") if isinstance(item, dict) else "uploaded"
+                    work_items.append({
+                        "id": Path(name).stem,
+                        "source_name": name,
+                        "dataset_type": dataset_type,
+                        "intent": intent,
+                        "label": "处理失败",
+                        "matched_rules": [],
+                        "reason": f"文件读取失败：{str(exc)[:220] or type(exc).__name__}",
+                        "confidence": 0.0,
+                        "mode": "error",
+                    })
+            if not work_items:
                 raise ValueError("上传文件中没有可判断的数据")
-            results = [None] * len(records)
-            with ThreadPoolExecutor(max_workers=min(3, len(records))) as pool:
-                futures = {pool.submit(judge_one, record, dataset_type, intent): idx for idx, record in enumerate(records)}
+            results: list[dict[str, Any] | None] = [None] * len(work_items)
+            records = [(idx, item) for idx, item in enumerate(work_items) if isinstance(item, Record)]
+            for idx, item in enumerate(work_items):
+                if isinstance(item, dict):
+                    results[idx] = item
+            with ThreadPoolExecutor(max_workers=max(1, min(3, len(records)))) as pool:
+                futures = {pool.submit(judge_one, record, dataset_type, intent): idx for idx, record in records}
                 for future in as_completed(futures):
                     results[futures[future]] = future.result()
             self.send_json({
