@@ -74,9 +74,9 @@ textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(15,107,8
 .run-button:disabled { opacity: .6; cursor: wait; }
 .privacy { color: #89938f; margin: 10px 0 0; font-size: 9px; text-align: center; }
 
-.result-panel { min-height: 520px; }
+.result-panel { min-height: 600px; }
 .copy-button { padding: 7px 10px; color: var(--green); border: 1px solid #bfd2ca; border-radius: 7px; background: white; font-size: 10px; }
-.empty-state, .loading-state { min-height: 445px; padding: 36px 42px; display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; }
+.empty-state, .loading-state { min-height: 540px; padding: 40px 42px; display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; }
 .empty-state h3, .loading-state h3 { margin: 23px 0 6px; font-family: SimSun, serif; }
 .empty-state p, .loading-state p { color: var(--muted); font-size: 12px; }
 .radar { position: relative; width: 108px; height: 108px; display: grid; place-items: center; border: 1px solid #a9c5ba; border-radius: 50%; }
