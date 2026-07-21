@@ -387,18 +387,21 @@ def deterministic_checks(
             checks.append({"rule_id": rule_id, "message": message, "evidence": evidence})
 
     if dataset_type == "立项申请书":
-        approval_headings = ["申请部门/单位意见", "直属单位科技管理部门意见"]
+        approval_headings = [
+            ("申请部门/单位意见", r"申请(?:部门/单位|部门|单位)意见"),
+            ("科技管理部门意见", r"(?:直属单位|申请单位)科技管理部门意见"),
+        ]
         blank_approval_sections: list[str] = []
-        for index, heading in enumerate(approval_headings):
-            next_heading = approval_headings[index + 1] if index + 1 < len(approval_headings) else None
-            end_pattern = re.escape(next_heading) if next_heading else r"注[：:]|廉洁及科研诚信承诺书|$"
+        for index, (label, heading_pattern) in enumerate(approval_headings):
+            next_heading_pattern = approval_headings[index + 1][1] if index + 1 < len(approval_headings) else None
+            end_pattern = next_heading_pattern if next_heading_pattern else r"注[：:]|廉洁及科研诚信承诺书|$"
             section = re.search(
-                rf"{re.escape(heading)}[：:]?(.*?)(?={end_pattern})",
+                rf"{heading_pattern}[：:]?(.*?)(?={end_pattern})",
                 text,
                 re.S,
             )
             if section and not re.search(r"同意|不同意|不予|退回|经审核|批准|建议", section.group(1)):
-                blank_approval_sections.append(heading)
+                blank_approval_sections.append(label)
         if len(blank_approval_sections) == len(approval_headings):
             checks.append({
                 "rule_id": "R-C09",
@@ -516,7 +519,7 @@ def call_llm(
             "matched_rules只放真正用于裁决且有证据的规则",
         ],
         "calibration_guardrails": [
-            "签字、公章或日期空白不能单独否决；但立项申请书的两级审批意见均没有任何明确结论时，应按R-C09审查",
+            "签字、公章或日期空白不能单独否决；但审批意见栏只有公章或日期占位，没有同意、不同意、退回、建议等意见内容时，属于审批意见本身空白；立项申请书两级意见均空白应按R-C09审查",
             "某标题附近没有正文不等于内容缺失；必须检查全文其他表格或章节是否已提供对应信息",
             "预算比较必须确认统计口径相同；费用性明细不能直接与包含资本性的总经费比较",
             "资本性经费未在费用性年度栏展示，不得自动推断预算不闭合",
